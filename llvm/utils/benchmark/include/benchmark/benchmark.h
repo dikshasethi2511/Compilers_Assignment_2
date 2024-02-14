@@ -180,6 +180,7 @@ BENCHMARK(BM_test)->Unit(benchmark::kMillisecond);
 #include <vector>
 #include <map>
 #include <set>
+#include <limits>
 
 #if defined(BENCHMARK_HAS_CXX11)
 #include <type_traits>
