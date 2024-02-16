@@ -84,3 +84,6 @@ bindings/go/llvm/workdir
 
 # Adding the build directory.
 build/
+
+# Adding tests and generated executables.
+tests/
