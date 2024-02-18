@@ -75,42 +75,45 @@ struct NullCheck : public FunctionPass {
       }
     }
 
-    // Walk across all instructions and apply meet and transfer functions
-    for (auto &B : F) {
-      dbgs() << "block name: " << B.getName() << "\n";
-      dbgs() << "first instruction: " << B.front().getName().str() << "\n";
-      dbgs() << "last instruction: " << B.back().getName().str() << "\n";
-      // For all Basic Blocks
-      for (BasicBlock *PredBB : predecessors(&B)) {
+    bool changeFlag;
+    while (changeFlag == true) {
+      changeFlag = false;
 
-        // dbgs() << "predecessor name: " << PredBB->getName().str() << "\n";
-        // for (auto &I : B) {
-        //   dbgs() << "predecessor name: " << I.getPrevNode()->getName().str()
-        //          << "\n";
-        // }
+      // Walk across all basic blocks
+      for (auto &B : F) {
+        // 1. B.front() which is the first instruction, apply meet operator on
+        // the terminator of all  predecessors. ( IN[first intruction] = for all
+        // pred meet(ins, out(terminator inst of pred))
+
+        // Find the IN Of the first instruction of the basic block
+        for (BasicBlock *PredBB : predecessors(&B)) {
+          // You can also use PredBB.back() here
+          IN[&B.front()] = meet(IN[&B.front()], OUT[PredBB->getTerminator()]);
+        }
+
+        // 2. Walk through the rest of the instructions, and apply
+        for (auto &I : B) {
+          // TODO: Make sure that this skips the first instruction, and nothing
+          // else. This is a way to identify what is not the first instruction
+          if (I.getPrevNode() != NULL) {
+            IN[&I] = OUT[I.getPrevNode()];
+          }
+
+          // TODO: Check if OUT[I] has changed or not, if it has changed then
+          // set changeFlag = true
+
+          OUT[&I] = transfer(&I, IN[&I], OUT[&I]);
+          
+        }
       }
+
+      // dbgs() << "block name: " << B.getName() << "\n";
+      // dbgs() << "first instruction: " << B.front().getName().str() << "\n";
+      // dbgs() << "last instruction: " << current->getParent.str() << "\n";
+      // dbgs() << "predecessor name: " << PredBB->getName().str() << "\n";
       // for (auto &I : B) {
-      //   for (Instruction *PredI : I.prede) {
-      //   }
-
-      //   // Initialize IN set with conservative values (e.g., all pointers
-      //   // are undefined).
-      //   for (auto &operand : I.operands()) {
-      //     if (isa<PointerType>(operand->getType())) {
-      //       dbgs() << "instruction name: " << I.getName().str() << "\n";
-
-      //       IN[&I][operand->getName().str()] = NullCheckType::UNDEFINED;
-      //       OUT[&I][operand->getName().str()] = NullCheckType::UNDEFINED;
-      //       // Push I.getName() also to the set. Make it possible null if
-      //       // operand is not mymalloc.
-      //     }
-      //     if (isa<PointerType>(I.getType())) {
-      //       dbgs() << "instruction type: " << I.getType()->getTypeID()
-      //              << "\n";
-      //       IN[&I][I.getName().str()] = NullCheckType::UNDEFINED;
-      //       OUT[&I][I.getName().str()] = NullCheckType::UNDEFINED;
-      //     }
-      //   }
+      //   dbgs() << "predecessor name: " << I.getPrevNode()->getName().str()
+      //          << "\n";
       // }
     }
   }
