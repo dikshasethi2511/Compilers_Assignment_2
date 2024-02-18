@@ -45,6 +45,94 @@ struct NullCheck : public FunctionPass {
   // TODO: Make this unordered map
   std::vector<std::string> pointerOperands;
 
+  std::unordered_map<std::string, NullCheckType>
+  meet(const std::unordered_map<std::string, NullCheckType> &currentInstruction,
+       const std::unordered_map<std::string, NullCheckType>
+           &prevBlockTerminatorInstruction) {
+    // The meet operation computes the intersection of two sets
+    std::unordered_map<std::string, NullCheckType> result;
+
+    // Iterate over all strings in currentInstruction
+    for (const auto &entry : currentInstruction) {
+      const std::string &name = entry.first;
+
+      // Find the corresponding value in prevBlockTerminatorInstruction
+      auto it = prevBlockTerminatorInstruction.find(name);
+
+      // If the string is present in both sets
+      if (it != prevBlockTerminatorInstruction.end()) {
+        // Compare values and update result accordingly
+        result[name] = (entry.second == NullCheckType::NOT_A_NULL &&
+                        it->second == NullCheckType::NOT_A_NULL)
+                           ? NullCheckType::NOT_A_NULL
+                           : NullCheckType::MIGHT_BE_NULL;
+      } else {
+        // If the string is not present in prevBlockTerminatorInstruction, keep
+        // the value from currentInstruction
+        result[name] = entry.second;
+      }
+    }
+
+    return result;
+  }
+
+  // Define the transfer function
+  // @dikshu complete transfer function
+  std::unordered_map<std::string, NullCheckType>
+  transfer(Instruction *I,
+           const std::unordered_map<std::string, NullCheckType> &inSet,
+           const std::unordered_map<std::string, NullCheckType> &outSet) {
+    // The transfer function logic based on your requirements
+    std::unordered_map<std::string, NullCheckType> result = outSet;
+
+    // Check if the instruction is Alloca, Call, Load, Store, GetElementPtr, or
+    // Cast
+    AllocaInst *AI = dyn_cast<AllocaInst>(I);
+    CallInst *CI = dyn_cast<CallInst>(I);
+    LoadInst *LI = dyn_cast<LoadInst>(I);
+    StoreInst *SI = dyn_cast<StoreInst>(I);
+    GetElementPtrInst *GEP = dyn_cast<GetElementPtrInst>(I);
+    CastInst *CAI = dyn_cast<CastInst>(I);
+
+    if (AI) {
+      // If the instruction is an Alloca instruction
+
+    }
+
+    if (AI || CI || LI || SI || GEP || CAI) {
+      // If the instruction is one of the specified types
+
+      // For all elements inside the in set, make them MIGHT_BE_NULL
+      for (const auto &entry : inSet) {
+        const std::string &operandName = entry.first;
+        result[operandName] = NullCheckType::MIGHT_BE_NULL;
+      }
+
+      // If the operand for a Call instruction is mymalloc, set the element to
+      // NOT_A_NULL
+      if (CI && isMallocCall(CI)) {
+        for (const auto &entry : inSet) {
+          const std::string &operandName = entry.first;
+          result[operandName] = NullCheckType::NOT_A_NULL;
+        }
+      }
+    } else {
+      // If the instruction is not one of the specified types, OUT = IN
+      result = inSet;
+    }
+
+    return result;
+  }
+
+  // Helper function to check if a Call instruction is a malloc call
+  bool isMallocCall(CallInst *CI) {
+    Function *Callee = CI->getCalledFunction();
+    if (Callee && Callee->getName() == "mymalloc") {
+      return true;
+    }
+    return false;
+  }
+
   // Data Flow Analysis for checking the nullpointers.
   void performDataFlowAnalysis(Function &F) {
     // Collect all pointer operands in an array
@@ -103,7 +191,6 @@ struct NullCheck : public FunctionPass {
           // set changeFlag = true
 
           OUT[&I] = transfer(&I, IN[&I], OUT[&I]);
-          
         }
       }
 
