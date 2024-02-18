@@ -38,55 +38,52 @@ struct NullCheck : public FunctionPass {
   static char ID;
   NullCheck() : FunctionPass(ID) {}
 
+  // IN and OUT sets for all instructions.
   std::unordered_map<Instruction *,
                      std::unordered_map<std::string, NullCheckType>>
       IN, OUT;
 
-  // TODO: Make this unordered map
+  // Vector to store all pointer operands in the function.
   std::vector<std::string> pointerOperands;
 
   std::unordered_map<std::string, NullCheckType>
   meet(const std::unordered_map<std::string, NullCheckType> &currentInstruction,
        const std::unordered_map<std::string, NullCheckType>
            &prevBlockTerminatorInstruction) {
-    // The meet operation computes the intersection of two sets
+
     std::unordered_map<std::string, NullCheckType> result;
 
-    // Iterate over all strings in currentInstruction
+    // Iterate over all operands in currentInstruction.
     for (const auto &entry : currentInstruction) {
       const std::string &name = entry.first;
 
-      // Find the corresponding value in prevBlockTerminatorInstruction
+      // Find the corresponding value in prevBlockTerminatorInstruction.
       auto it = prevBlockTerminatorInstruction.find(name);
 
-      // If the string is present in both sets
+      // If the string is present in both sets.
       if (it != prevBlockTerminatorInstruction.end()) {
-        // Compare values and update result accordingly
+        // If even one of them is MIGHT_BE_NULL, the result is MIGHT_BE_NULL.
         result[name] = (entry.second == NullCheckType::NOT_A_NULL &&
                         it->second == NullCheckType::NOT_A_NULL)
                            ? NullCheckType::NOT_A_NULL
                            : NullCheckType::MIGHT_BE_NULL;
       } else {
-        // If the string is not present in prevBlockTerminatorInstruction, keep
-        // the value from currentInstruction
+        // If the variable is not present in prevBlockTerminatorInstruction,
+        // keep the value from currentInstruction.
         result[name] = entry.second;
       }
     }
-
     return result;
   }
 
-  // Define the transfer function
-  // @dikshu complete transfer function
   std::unordered_map<std::string, NullCheckType>
   transfer(Instruction *I,
            const std::unordered_map<std::string, NullCheckType> &inSet,
            const std::unordered_map<std::string, NullCheckType> &outSet) {
-    // The transfer function logic based on your requirements
     std::unordered_map<std::string, NullCheckType> result = outSet;
 
     // Check if the instruction is Alloca, Call, Load, Store, GetElementPtr, or
-    // Cast
+    // Cast.
     AllocaInst *AI = dyn_cast<AllocaInst>(I);
     CallInst *CI = dyn_cast<CallInst>(I);
     LoadInst *LI = dyn_cast<LoadInst>(I);
@@ -95,36 +92,69 @@ struct NullCheck : public FunctionPass {
     CastInst *CAI = dyn_cast<CastInst>(I);
 
     if (AI) {
-      // If the instruction is an Alloca instruction
-
+      // If the instruction is an Alloca instruction then the pointer operand is
+      // definitely not NULL.
+      if (isa<PointerType>(AI->getAllocatedType())) {
+        result[AI->getName().str()] = NullCheckType::NOT_A_NULL;
+      }
     }
 
-    if (AI || CI || LI || SI || GEP || CAI) {
-      // If the instruction is one of the specified types
-
-      // For all elements inside the in set, make them MIGHT_BE_NULL
-      for (const auto &entry : inSet) {
-        const std::string &operandName = entry.first;
-        result[operandName] = NullCheckType::MIGHT_BE_NULL;
+    // If the instruction is a Load instruction, then the left hand side is set
+    // to might be NULL.
+    else if (LI) {
+      if (isa<PointerType>(LI->getType())) {
+        result[LI->getName().str()] = NullCheckType::MIGHT_BE_NULL;
       }
+    }
 
-      // If the operand for a Call instruction is mymalloc, set the element to
-      // NOT_A_NULL
-      if (CI && isMallocCall(CI)) {
-        for (const auto &entry : inSet) {
-          const std::string &operandName = entry.first;
-          result[operandName] = NullCheckType::NOT_A_NULL;
-        }
+    // If the instruction is a Store instruction, then the pointer operand is
+    // set to might be NULL. Note: We only consider the pointer operand of the
+    // Store instruction.
+    else if (SI) {
+      if (isa<PointerType>(SI->getPointerOperand()->getType())) {
+        result[SI->getPointerOperand()->getName().str()] =
+            NullCheckType::MIGHT_BE_NULL;
+      }
+    }
+
+    // If the instruction is a Call instruction and calls the mymalloc function,
+    // then the left hand side can never be NULL.
+    else if (CI && isMallocCall(CI)) {
+      if (isa<PointerType>(CI->getType())) {
+        result[CI->getName().str()] = NullCheckType::NOT_A_NULL;
+      }
+    }
+
+    // Otherwise the pointer argument is set to might be NULL.
+    else if (CI) {
+      if (isa<PointerType>(CI->getType())) {
+        result[CI->getName().str()] = NullCheckType::MIGHT_BE_NULL;
+      }
+    }
+
+    // If the instruction is a GetElementPtr instruction, then the left hand
+    // side is set to might be NULL.
+    else if (GEP) {
+      if (isa<PointerType>(GEP->getType())) {
+        result[GEP->getName().str()] = NullCheckType::MIGHT_BE_NULL;
+      }
+    }
+
+    // If the instruction is a Cast instruction, then the left hand side is set
+    // to might be NULL.
+    else if (CAI) {
+      if (isa<PointerType>(CAI->getType())) {
+        result[CAI->getName().str()] = NullCheckType::MIGHT_BE_NULL;
       }
     } else {
-      // If the instruction is not one of the specified types, OUT = IN
+      // If the instruction is not one of the specified types, OUT = IN.
       result = inSet;
     }
 
     return result;
   }
 
-  // Helper function to check if a Call instruction is a malloc call
+  // Checks if a Call instruction is a malloc call.
   bool isMallocCall(CallInst *CI) {
     Function *Callee = CI->getCalledFunction();
     if (Callee && Callee->getName() == "mymalloc") {
@@ -134,14 +164,25 @@ struct NullCheck : public FunctionPass {
   }
 
   // Data Flow Analysis for checking the nullpointers.
+  // performDataFlowAnalysis performs a forward data flow analysis to check for
+  // null pointers in the program.
+  // Steps:
+  // 1. Initialization: The IN and OUT sets of all instructions contain a map of
+  // all pointer operands in the function, with their values set to UNDEFINED.
+  // 2. Iteration: The IN and OUT sets of all instructions are updated using the
+  // transfer function and the meet operator until the OUT sets of all the
+  // instructions stop changing.
   void performDataFlowAnalysis(Function &F) {
-    // Collect all pointer operands in an array
+    // Storing all pointer operands in the function in the pointerOperands
+    // vector.
     for (auto &B : F) {
       for (auto &I : B) {
         for (auto &operand : I.operands()) {
+          // Stores the operands on the right hand side.
           if (isa<PointerType>(operand->getType())) {
             pointerOperands.push_back(operand->getName().str());
           }
+          // Stores the variables on the right hand side.
           if (isa<PointerType>(I.getType())) {
             pointerOperands.push_back(I.getName().str());
           }
@@ -150,58 +191,49 @@ struct NullCheck : public FunctionPass {
     }
 
     // Initialize IN and OUT sets of all instructions for all pointer operands
-    // as UNDEFINED
+    // as UNDEFINED.
     for (auto &B : F) {
       for (auto &I : B) {
-        // Iterate over the pointerOperands vector
+        // Iterate over the pointerOperands vector.
         for (std::string operandName : pointerOperands) {
           IN[&I][operandName] = NullCheckType::UNDEFINED;
           OUT[&I][operandName] = NullCheckType::UNDEFINED;
-
-          // dbgs() << "operand name: " << operandName << "\n";
         }
       }
     }
 
-    bool changeFlag;
-    while (changeFlag == true) {
-      changeFlag = false;
+    bool hasOutChanged = true;
 
-      // Walk across all basic blocks
+    while (hasOutChanged == true) {
+      hasOutChanged = false;
+      // Walk across all basic blocks.
       for (auto &B : F) {
-        // 1. B.front() which is the first instruction, apply meet operator on
-        // the terminator of all  predecessors. ( IN[first intruction] = for all
-        // pred meet(ins, out(terminator inst of pred))
+        // The IN set for the first instruction of the basic block is computed
+        // by applying the meet operator on the terminator of all predecessors.
+        // B.front() fetches the first instruction of the basic block.
+        // IN[First_Instruction] = For all Preds => meet(IN, OUT(Last
+        // instruction of Preds))
 
-        // Find the IN Of the first instruction of the basic block
         for (BasicBlock *PredBB : predecessors(&B)) {
-          // You can also use PredBB.back() here
           IN[&B.front()] = meet(IN[&B.front()], OUT[PredBB->getTerminator()]);
         }
 
-        // 2. Walk through the rest of the instructions, and apply
+        // Start the iteration from the first instruction of the basic block.
         for (auto &I : B) {
-          // TODO: Make sure that this skips the first instruction, and nothing
-          // else. This is a way to identify what is not the first instruction
-          if (I.getPrevNode() != NULL) {
+          // Doesn't update the IN set for the first instruction of the basic
+          // block.
+          if (I.getPrevNode() != nullptr) {
             IN[&I] = OUT[I.getPrevNode()];
           }
 
-          // TODO: Check if OUT[I] has changed or not, if it has changed then
-          // set changeFlag = true
-
+          auto currentOld = OUT[&I];
           OUT[&I] = transfer(&I, IN[&I], OUT[&I]);
+
+          if (currentOld != OUT[&I]) {
+            hasOutChanged = true;
+          }
         }
       }
-
-      // dbgs() << "block name: " << B.getName() << "\n";
-      // dbgs() << "first instruction: " << B.front().getName().str() << "\n";
-      // dbgs() << "last instruction: " << current->getParent.str() << "\n";
-      // dbgs() << "predecessor name: " << PredBB->getName().str() << "\n";
-      // for (auto &I : B) {
-      //   dbgs() << "predecessor name: " << I.getPrevNode()->getName().str()
-      //          << "\n";
-      // }
     }
   }
 
