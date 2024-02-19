@@ -237,9 +237,78 @@ struct NullCheck : public FunctionPass {
     }
   }
 
+  void addAddInstruction(Function &F) {
+    for (auto &B : F) {
+      // Create an IRBuilder and set it to the beginning of the basic block
+      IRBuilder<> Builder(&B);
+
+      for (auto &I : B) {
+        // Check if the instruction is not the terminator instruction
+        if (!I.isTerminator()) {
+          // Check if the type of the instruction is IntegerType
+          if (IntegerType *IntTy = dyn_cast<IntegerType>(I.getType())) {
+            // Check if the type is Int32
+            if (IntTy->getBitWidth() == 32) {
+              // Create an "add" instruction adding 1 to the result of the
+              // original instruction
+              Value *Op1 =
+                  &I; // Use the result of the original instruction as operand
+              Value *Op2 = Builder.getInt32(1); // Constant operand 1
+              Instruction *AddInst =
+                  dyn_cast<Instruction>(Builder.Create(Op1, Op2));
+            }
+          }
+        }
+      }
+    }
+  }
+
+  void addNullChecks(Function &F) {
+    for (auto &B : F) {
+      for (auto &I : B) {
+        // If the instruction is a Load instruction, then add a null check.
+        if (LoadInst *LI = dyn_cast<LoadInst>(&I)) {
+          if (isa<PointerType>(LI->getType())) {
+            // If the left hand side of the Load instruction is
+            MIGHT_BE_NULL,
+            // then add a null check.
+            if (OUT[&I][LI->getName().str()] == NullCheckType::MIGHT_BE_NULL)
+            {
+              // Create a new basic block for the null check.
+              BasicBlock *nullCheckBB = BasicBlock::Create(
+                  F.getContext(), "nullCheckBB",
+                  F.getEntryBlock().getParent());
+              // Create a new basic block for the original basic block.
+              BasicBlock *originalBB = B.splitBasicBlock(LI, "originalBB");
+              // Remove the unconditional branch instruction from the
+              original
+              // basic block.
+              B.getTerminator()->eraseFromParent();
+              // Add a conditional branch instruction to the original basic
+              block
+              // to the null check basic block.
+              IRBuilder<> builder(&B);
+              builder.CreateCondBr(
+                  builder.CreateICmpNE(LI,
+                  ConstantPointerNull::get(LI->getType())), originalBB,
+                  nullCheckBB);
+              // Add the null check to the null check basic block.
+              IRBuilder<> builder2(nullCheckBB);
+              builder2.CreateCall(
+                  Intrinsic::getDeclaration(F.getParent(), Intrinsic::trap));
+              builder2.CreateBr(originalBB);
+            }
+          }
+        }
+      }
+    }
+  }
+
   bool runOnFunction(Function &F) override {
     dbgs() << "running nullcheck pass on: " << F.getName() << "\n";
     performDataFlowAnalysis(F);
+    // addNullChecks(F);
+    addAddInstruction(F);
     return false;
   }
 }; // end of struct NullCheck
