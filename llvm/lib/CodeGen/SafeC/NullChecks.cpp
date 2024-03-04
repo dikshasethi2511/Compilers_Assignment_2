@@ -33,77 +33,6 @@ enum class NullCheckType {
   MIGHT_BE_NULL,
 };
 
-struct NullCheckModule : public ModulePass {
-  static char ID;
-  NullCheckModule() : ModulePass(ID) {}
-
-  void createNullCheckFunction(Module &M) {
-    dbgs() << "Creating null check function\n";
-    // Create a new function type.
-    FunctionType *FT = FunctionType::get(
-        Type::getVoidTy(M.getContext()),
-        {PointerType::get(Type::getInt8Ty(M.getContext()), 0)}, false);
-
-    // Create a new function.
-    Function *nullCheckFunction = Function::Create(
-        FT, GlobalValue::InternalLinkage, "nullCheckFunction", M);
-
-    // We create three basic blocks for this function.
-    // The exit basic block contains the instruction for exiting from this
-    // entire call.
-    BasicBlock *exit_block =
-        BasicBlock::Create(M.getContext(), "exit.block", nullCheckFunction);
-    {
-      IRBuilder<> builder(exit_block);
-
-      // We create the exit function similar to the null check function that is
-      // being created. Then this function is called.
-
-      FunctionType *exitFT =
-          FunctionType::get(Type::getVoidTy(M.getContext()),
-                            {Type::getInt32Ty(M.getContext())}, false);
-      Function *exit_func =
-          cast<Function>(M.getOrInsertFunction("exit", exitFT).getCallee());
-      dbgs() << "exit_func: " << exit_func->getName() << "\n";
-      // The argument for this exit call is 1, which is the exit code.
-      Value *one = ConstantInt::getSigned(Type::getInt32Ty(M.getContext()), 1);
-      // The exit function is called. Then we add the unreachable instruction
-      // which means that the code will never reach this point.
-      builder.CreateCall(exitFT, exit_func, {one});
-      builder.CreateUnreachable();
-    }
-
-    // The next block is the end block which calls the return statement.
-    BasicBlock *end =
-        BasicBlock::Create(M.getContext(), "end", nullCheckFunction);
-    {
-      IRBuilder<> builder(end);
-      builder.CreateRetVoid();
-    }
-
-    // This block contains the main logic for checking the nullpointers.
-    BasicBlock *main_logic = BasicBlock::Create(M.getContext(), "main.logic",
-                                                nullCheckFunction, exit_block);
-    {
-      IRBuilder<> builder(main_logic);
-      Value *p = &*nullCheckFunction->arg_begin();
-      Value *identifiedAsNull = builder.CreateICmpEQ(
-          p,
-          ConstantPointerNull::get(static_cast<PointerType *>(p->getType())));
-
-      // If the pointer is null, then we jump to the exit block, which exits the
-      // program. Otherwise we just continue by returning from the function.
-      builder.CreateCondBr(identifiedAsNull, exit_block, end);
-    }
-  }
-
-  virtual bool runOnModule(Module &M) {
-    createNullCheckFunction(M);
-
-    return true;
-  }
-};
-
 struct NullCheck : public FunctionPass {
 
   static char ID;
@@ -113,6 +42,8 @@ struct NullCheck : public FunctionPass {
   std::unordered_map<Instruction *,
                      std::unordered_map<std::string, NullCheckType>>
       IN, OUT;
+
+  int count = 0;
 
   // Vector to store all pointer operands in the function.
   std::vector<std::string> pointerOperands;
@@ -308,26 +239,35 @@ struct NullCheck : public FunctionPass {
     }
   }
 
-  void addNullChecks(Instruction *currentInstruction, Value *operand) {
-    dbgs() << "Adding null check for: " << *currentInstruction << "\n";
-    IRBuilder<> builder(currentInstruction);
-    Module *M = currentInstruction->getParent()->getParent()->getParent();
-    Function *nullcheckFunction = M->getFunction("nullCheckFunction");
-    dbgs() << "nullcheckFunction: " << nullcheckFunction->getName() << "\n";
-    Value *arg =
-        builder.CreatePointerCast(operand, Type::getInt8PtrTy(M->getContext()));
-    builder.CreateCall(nullcheckFunction->getFunctionType(), nullcheckFunction,
-                       {arg});
-  }
-
   bool runOnFunction(Function &F) override {
     dbgs() << "running nullcheck pass on: " << F.getName() << "\n";
     performDataFlowAnalysis(F);
 
-    for (auto &B : F) {
-      for (auto &I : B) {
-        Instruction *currentInst = &I;
+    // Map of instructions already processed.
+    std::unordered_map<Instruction *, bool> processedInstructions;
+
+    for (auto B_it = F.begin(); B_it != F.end(); ++B_it) {
+      BasicBlock *B = &*B_it;
+      for (auto I_it = B->begin(); I_it != B->end(); ++I_it) {
+        bool nullcheckFound = false;
+
+        // Check if processedInstructions contains the current instruction.
+        if (processedInstructions.find(&*I_it) != processedInstructions.end()) {
+          break;
+        }
+
+        // Print all the basic blocks of the function.
+        dbgs() << "Function: " << F.getName() << "\n";
+        dbgs() << "Basic Blocks: \n";
+        for (auto &B : F) {
+          dbgs() << B.getName() << "\n";
+        }
+        Instruction *currentInst = &*I_it;
         Value *operand;
+
+        dbgs() << "currentInst: " << *currentInst << "\n";
+
+        // Determine the operand based on the instruction type
         if (LoadInst *LI = dyn_cast<LoadInst>(currentInst)) {
           operand = LI->getPointerOperand();
         } else if (StoreInst *SI = dyn_cast<StoreInst>(currentInst)) {
@@ -344,12 +284,78 @@ struct NullCheck : public FunctionPass {
         if (OUT[currentInst][operand->getName().str()] ==
             NullCheckType::MIGHT_BE_NULL) {
           dbgs() << "Found a null check: " << *currentInst << "\n";
-          addNullChecks(currentInst, operand);
+          dbgs() << "Current basic block: " << (*B_it).getName() << "\n";
+
+          // Add to processedInstructions map.
+          processedInstructions[currentInst] = true;
+
+          // Split the basic block before this instruction I of this basic block
+          std::string nameBB = "nullCheckSplit" + std::to_string(count);
+          BasicBlock *NewBB = (*B_it).splitBasicBlock(currentInst, nameBB);
+
+          count++;
+
+          // Print the last instruction of NewBB.
+          dbgs() << "NewBB: " << NewBB->getName() << "\n";
+          dbgs() << "NewBB Last Instruction: " << NewBB->back() << "\n";
+          // Print the first instruction of newBB.
+          dbgs() << "NewBB First Instruction: " << NewBB->front() << "\n";
+
+          // Create the blocks for null check logic.
+          BasicBlock *CheckBlock =
+              BasicBlock::Create(F.getContext(), "NullCheck", &F);
+          BasicBlock *ExitBlock =
+              BasicBlock::Create(F.getContext(), "NullCheckExit", &F);
+
+          // Add the null check logic in the CheckBlock.
+          IRBuilder<> builder(CheckBlock);
+          Value *isNull = builder.CreateICmpEQ(
+              operand,
+              ConstantPointerNull::get(cast<PointerType>(operand->getType())));
+          builder.CreateCondBr(isNull, ExitBlock, NewBB);
+
+          // Terminate the ExitBlock.
+          IRBuilder<> exitBuilder(ExitBlock);
+          exitBuilder.CreateUnreachable();
+
+          // Print all the instructions of the CheckBlock and the ExitBlock.
+          dbgs() << "CheckBlock: " << CheckBlock->getName() << "\n";
+          dbgs() << "CheckBlock Instructions: \n";
+          for (auto &I : *CheckBlock) {
+            dbgs() << I << "\n";
+          }
+          dbgs() << "ExitBlock: " << ExitBlock->getName() << "\n";
+          dbgs() << "ExitBlock Instructions: \n";
+          for (auto &I : *ExitBlock) {
+            dbgs() << I << "\n";
+          }
+
+          // Before deleting the original instruction from the basic block.
+          // Print the last instruction of the original basic block.
+          dbgs() << "OriginalBB: " << (*B_it).getName() << "\n";
+          dbgs() << "OriginalBB Last Instruction: " << (*B_it).back() << "\n";
+
+          dbgs() << "OriginalBB Second Last Instruction: ";
+          Instruction *secondLastInst = (*B_it).back().getPrevNode();
+          secondLastInst->print(dbgs()); // or use dump() for more details
+          dbgs() << "\n";
+
+          // Remove the unconditional branch instruction from the original basic
+          // block.
+          (*B_it).getTerminator()->eraseFromParent();
+          // Insert a branch instruction to the checkBlock.
+          IRBuilder<> originalBlockBuilder(&*B_it);
+          originalBlockBuilder.CreateBr(CheckBlock);
+          nullcheckFound = true;
+        }
+        if (nullcheckFound) {
+          break;
         }
       }
     }
     return false;
   }
+
 }; // end of struct NullCheck
 
 } // end of anonymous namespace
@@ -358,10 +364,6 @@ char NullCheck::ID = 0;
 static RegisterPass<NullCheck> X("nullcheck", "Null Check Pass",
                                  false /* Only looks at CFG */,
                                  false /* Analysis Pass */);
-
-char NullCheckModule::ID = 0;
-static RegisterPass<NullCheckModule>
-    Z("add-nullcheck-func", "add a function that does null checking");
 
 static RegisterStandardPasses Y(PassManagerBuilder::EP_EarlyAsPossible,
                                 [](const PassManagerBuilder &Builder,
