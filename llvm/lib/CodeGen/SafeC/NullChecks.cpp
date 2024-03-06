@@ -23,6 +23,9 @@
 #include <set>
 #include <unordered_map>
 
+#include "llvm/IR/Constants.h"
+#include "llvm/IR/Intrinsics.h"
+
 using namespace llvm;
 
 namespace {
@@ -39,50 +42,50 @@ struct NullCheck : public FunctionPass {
   NullCheck() : FunctionPass(ID) {}
 
   // IN and OUT sets for all instructions.
-  std::unordered_map<Instruction *,
-                     std::unordered_map<std::string, NullCheckType>>
+  std::unordered_map<Instruction *, std::unordered_map<Value *, NullCheckType>>
       IN, OUT;
 
   int count = 0;
 
   // Vector to store all pointer operands in the function.
-  std::vector<std::string> pointerOperands;
+  std::vector<Value *> pointerOperands;
+  std::vector<Value *> argOperands;
 
-  std::unordered_map<std::string, NullCheckType>
-  meet(const std::unordered_map<std::string, NullCheckType> &currentInstruction,
-       const std::unordered_map<std::string, NullCheckType>
+  std::unordered_map<Value *, NullCheckType>
+  meet(const std::unordered_map<Value *, NullCheckType> &currentInstruction,
+       const std::unordered_map<Value *, NullCheckType>
            &prevBlockTerminatorInstruction) {
 
-    std::unordered_map<std::string, NullCheckType> result;
+    std::unordered_map<Value *, NullCheckType> result;
 
     // Iterate over all operands in currentInstruction.
     for (const auto &entry : currentInstruction) {
-      const std::string &name = entry.first;
+      Value *const &op = entry.first;
 
       // Find the corresponding value in prevBlockTerminatorInstruction.
-      auto it = prevBlockTerminatorInstruction.find(name);
+      auto it = prevBlockTerminatorInstruction.find(op);
 
       // If the string is present in both sets.
       if (it != prevBlockTerminatorInstruction.end()) {
         // If even one of them is MIGHT_BE_NULL, the result is MIGHT_BE_NULL.
-        result[name] = (entry.second == NullCheckType::NOT_A_NULL &&
-                        it->second == NullCheckType::NOT_A_NULL)
-                           ? NullCheckType::NOT_A_NULL
-                           : NullCheckType::MIGHT_BE_NULL;
+        result[op] = (entry.second == NullCheckType::NOT_A_NULL &&
+                      it->second == NullCheckType::NOT_A_NULL)
+                         ? NullCheckType::NOT_A_NULL
+                         : NullCheckType::MIGHT_BE_NULL;
       } else {
         // If the variable is not present in prevBlockTerminatorInstruction,
         // keep the value from currentInstruction.
-        result[name] = entry.second;
+        result[op] = entry.second;
       }
     }
     return result;
   }
 
-  std::unordered_map<std::string, NullCheckType>
+  std::unordered_map<Value *, NullCheckType>
   transfer(Instruction *I,
-           const std::unordered_map<std::string, NullCheckType> &inSet,
-           const std::unordered_map<std::string, NullCheckType> &outSet) {
-    std::unordered_map<std::string, NullCheckType> result = outSet;
+           const std::unordered_map<Value *, NullCheckType> &inSet,
+           const std::unordered_map<Value *, NullCheckType> &outSet) {
+    std::unordered_map<Value *, NullCheckType> result = inSet;
 
     // Check if the instruction is Alloca, Call, Load, Store, GetElementPtr, or
     // Cast.
@@ -97,7 +100,7 @@ struct NullCheck : public FunctionPass {
       // If the instruction is an Alloca instruction then the pointer operand is
       // definitely not NULL.
       if (isa<PointerType>(AI->getAllocatedType())) {
-        result[AI->getName().str()] = NullCheckType::NOT_A_NULL;
+        result[AI] = NullCheckType::NOT_A_NULL;
       }
     }
 
@@ -105,17 +108,17 @@ struct NullCheck : public FunctionPass {
     // to might be NULL.
     else if (LI) {
       if (isa<PointerType>(LI->getType())) {
-        result[LI->getName().str()] = NullCheckType::MIGHT_BE_NULL;
+        result[LI] = NullCheckType::MIGHT_BE_NULL;
       }
     }
 
     // If the instruction is a Store instruction, then the pointer operand is
     // set to might be NULL. Note: We only consider the pointer operand of the
     // Store instruction.
+    // TODO: This might not be correct, check this
     else if (SI) {
       if (isa<PointerType>(SI->getPointerOperand()->getType())) {
-        result[SI->getPointerOperand()->getName().str()] =
-            NullCheckType::MIGHT_BE_NULL;
+        result[SI->getPointerOperand()] = NullCheckType::MIGHT_BE_NULL;
       }
     }
 
@@ -123,14 +126,14 @@ struct NullCheck : public FunctionPass {
     // then the left hand side can never be NULL.
     else if (CI && isMallocCall(CI)) {
       if (isa<PointerType>(CI->getType())) {
-        result[CI->getName().str()] = NullCheckType::NOT_A_NULL;
+        result[CI] = NullCheckType::NOT_A_NULL;
       }
     }
 
     // Otherwise the pointer argument is set to might be NULL.
     else if (CI) {
       if (isa<PointerType>(CI->getType())) {
-        result[CI->getName().str()] = NullCheckType::MIGHT_BE_NULL;
+        result[CI] = NullCheckType::MIGHT_BE_NULL;
       }
     }
 
@@ -138,7 +141,7 @@ struct NullCheck : public FunctionPass {
     // side is set to might be NULL.
     else if (GEP) {
       if (isa<PointerType>(GEP->getType())) {
-        result[GEP->getName().str()] = NullCheckType::MIGHT_BE_NULL;
+        result[GEP] = NullCheckType::MIGHT_BE_NULL;
       }
     }
 
@@ -146,7 +149,7 @@ struct NullCheck : public FunctionPass {
     // to might be NULL.
     else if (CAI) {
       if (isa<PointerType>(CAI->getType())) {
-        result[CAI->getName().str()] = NullCheckType::MIGHT_BE_NULL;
+        result[CAI] = NullCheckType::MIGHT_BE_NULL;
       }
     } else {
       // If the instruction is not one of the specified types, OUT = IN.
@@ -179,16 +182,23 @@ struct NullCheck : public FunctionPass {
     // vector.
     for (auto &B : F) {
       for (auto &I : B) {
+        // Stores the variables on the right hand side.
+        if (isa<PointerType>(I.getType())) {
+          pointerOperands.push_back(&I);
+        }
         for (auto &operand : I.operands()) {
           // Stores the operands on the right hand side.
           if (isa<PointerType>(operand->getType())) {
-            pointerOperands.push_back(operand->getName().str());
-          }
-          // Stores the variables on the right hand side.
-          if (isa<PointerType>(I.getType())) {
-            pointerOperands.push_back(I.getName().str());
+            pointerOperands.push_back(operand);
           }
         }
+      }
+    }
+
+    // Get arguments of function call to F.
+    for (auto &arg : F.args()) {
+      if (isa<PointerType>(arg.getType())) {
+        argOperands.push_back(&arg);
       }
     }
 
@@ -197,9 +207,16 @@ struct NullCheck : public FunctionPass {
     for (auto &B : F) {
       for (auto &I : B) {
         // Iterate over the pointerOperands vector.
-        for (std::string operandName : pointerOperands) {
-          IN[&I][operandName] = NullCheckType::UNDEFINED;
-          OUT[&I][operandName] = NullCheckType::UNDEFINED;
+        for (Value *operandName : pointerOperands) {
+          // Check if it is in argOperands.
+          if (std::find(argOperands.begin(), argOperands.end(), operandName) !=
+              argOperands.end()) {
+            IN[&I][operandName] = NullCheckType::MIGHT_BE_NULL;
+            OUT[&I][operandName] = NullCheckType::MIGHT_BE_NULL;
+          } else {
+            IN[&I][operandName] = NullCheckType::UNDEFINED;
+            OUT[&I][operandName] = NullCheckType::UNDEFINED;
+          }
         }
       }
     }
@@ -240,8 +257,57 @@ struct NullCheck : public FunctionPass {
   }
 
   bool runOnFunction(Function &F) override {
+    if (F.getName() == "main") {
+      return false;
+    }
+
     dbgs() << "running nullcheck pass on: " << F.getName() << "\n";
+    IN = std::unordered_map<Instruction *,
+                            std::unordered_map<Value *, NullCheckType>>{};
+    OUT = std::unordered_map<Instruction *,
+                             std::unordered_map<Value *, NullCheckType>>{};
+
     performDataFlowAnalysis(F);
+
+    // Print IN and OUT sets.
+    for (auto &B : F) {
+      for (auto &I : B) {
+        dbgs() << "================>Instruction: " << I << "\n";
+        dbgs() << "IN ========> \n";
+        for (const auto &entry : IN[&I]) {
+          dbgs() << entry.first << " : ";
+          switch (entry.second) {
+          case NullCheckType::UNDEFINED:
+            dbgs() << "UNDEFINED";
+            break;
+          case NullCheckType::NOT_A_NULL:
+            dbgs() << "NOT_A_NULL";
+            break;
+          case NullCheckType::MIGHT_BE_NULL:
+            dbgs() << "MIGHT_BE_NULL";
+            break;
+          }
+          dbgs() << "\n";
+        }
+
+        dbgs() << "OUT ========> \n";
+        for (const auto &entry : OUT[&I]) {
+          dbgs() << entry.first << " : ";
+          switch (entry.second) {
+          case NullCheckType::UNDEFINED:
+            dbgs() << "UNDEFINED";
+            break;
+          case NullCheckType::NOT_A_NULL:
+            dbgs() << "NOT_A_NULL";
+            break;
+          case NullCheckType::MIGHT_BE_NULL:
+            dbgs() << "MIGHT_BE_NULL";
+            break;
+          }
+          dbgs() << "\n";
+        }
+      }
+    }
 
     // Map of instructions already processed.
     std::unordered_map<Instruction *, bool> processedInstructions;
@@ -256,12 +322,12 @@ struct NullCheck : public FunctionPass {
           break;
         }
 
-        // Print all the basic blocks of the function.
-        dbgs() << "Function: " << F.getName() << "\n";
-        dbgs() << "Basic Blocks: \n";
-        for (auto &B : F) {
-          dbgs() << B.getName() << "\n";
-        }
+        // // Print all the basic blocks of the function.
+        // dbgs() << "Function: " << F.getName() << "\n";
+        // dbgs() << "Basic Blocks: \n";
+        // for (auto &B : F) {
+        //   dbgs() << B.getName() << "\n";
+        // }
         Instruction *currentInst = &*I_it;
         Value *operand;
 
@@ -281,31 +347,32 @@ struct NullCheck : public FunctionPass {
           continue;
         }
 
-        if (OUT[currentInst][operand->getName().str()] ==
-            NullCheckType::MIGHT_BE_NULL) {
+        if (OUT[currentInst][operand] == NullCheckType::MIGHT_BE_NULL) {
           dbgs() << "Found a null check: " << *currentInst << "\n";
           dbgs() << "Current basic block: " << (*B_it).getName() << "\n";
 
           // Add to processedInstructions map.
           processedInstructions[currentInst] = true;
 
-          // Split the basic block before this instruction I of this basic block
-          std::string nameBB = "nullCheckSplit" + std::to_string(count);
+          // Split the basic block before this instruction I of this basic
+          // block
+          std::string nameBB = "after.splitting." + std::to_string(count);
           BasicBlock *NewBB = (*B_it).splitBasicBlock(currentInst, nameBB);
 
           count++;
 
-          // Print the last instruction of NewBB.
-          dbgs() << "NewBB: " << NewBB->getName() << "\n";
-          dbgs() << "NewBB Last Instruction: " << NewBB->back() << "\n";
-          // Print the first instruction of newBB.
-          dbgs() << "NewBB First Instruction: " << NewBB->front() << "\n";
+          // // Print the last instruction of NewBB.
+          // dbgs() << "NewBB: " << NewBB->getName() << "\n";
+          // dbgs() << "NewBB Last Instruction: " << NewBB->back() << "\n";
+          // // Print the first instruction of newBB.
+          // dbgs() << "NewBB First Instruction: " << NewBB->front() <<
+          // "\n";
 
           // Create the blocks for null check logic.
           BasicBlock *CheckBlock =
-              BasicBlock::Create(F.getContext(), "NullCheck", &F);
+              BasicBlock::Create(F.getContext(), "nullcheck", &F);
           BasicBlock *ExitBlock =
-              BasicBlock::Create(F.getContext(), "NullCheckExit", &F);
+              BasicBlock::Create(F.getContext(), "exit.block", &F);
 
           // Add the null check logic in the CheckBlock.
           IRBuilder<> builder(CheckBlock);
@@ -316,32 +383,42 @@ struct NullCheck : public FunctionPass {
 
           // Terminate the ExitBlock.
           IRBuilder<> exitBuilder(ExitBlock);
-          exitBuilder.CreateUnreachable();
+          exitBuilder.CreateRetVoid();
+          // FunctionType *ExitFuncType =
+          //     FunctionType::get(Type::getVoidTy(F.getContext()),
+          //                       {Type::getInt32Ty(F.getContext())}, false);
+          // FunctionCallee exitFunc =
+          //     F.getParent()->getOrInsertFunction("exit", ExitFuncType);
+          // exitBuilder.CreateCall(
+          //     exitFunc,
+          //     {ConstantInt::get(Type::getInt32Ty(F.getContext()), 0)});
+          // exitBuilder.CreateUnreachable();
 
-          // Print all the instructions of the CheckBlock and the ExitBlock.
-          dbgs() << "CheckBlock: " << CheckBlock->getName() << "\n";
-          dbgs() << "CheckBlock Instructions: \n";
-          for (auto &I : *CheckBlock) {
-            dbgs() << I << "\n";
-          }
-          dbgs() << "ExitBlock: " << ExitBlock->getName() << "\n";
-          dbgs() << "ExitBlock Instructions: \n";
-          for (auto &I : *ExitBlock) {
-            dbgs() << I << "\n";
-          }
+          // // Print all the instructions of the CheckBlock and the
+          // ExitBlock. dbgs() << "CheckBlock: " << CheckBlock->getName() <<
+          // "\n"; dbgs() << "CheckBlock Instructions: \n"; for (auto &I :
+          // *CheckBlock) {
+          //   dbgs() << I << "\n";
+          // }
+          // dbgs() << "ExitBlock: " << ExitBlock->getName() << "\n";
+          // dbgs() << "ExitBlock Instructions: \n";
+          // for (auto &I : *ExitBlock) {
+          //   dbgs() << I << "\n";
+          // }
 
           // Before deleting the original instruction from the basic block.
           // Print the last instruction of the original basic block.
-          dbgs() << "OriginalBB: " << (*B_it).getName() << "\n";
-          dbgs() << "OriginalBB Last Instruction: " << (*B_it).back() << "\n";
+          // dbgs() << "OriginalBB: " << (*B_it).getName() << "\n";
+          // dbgs() << "OriginalBB Last Instruction: " << (*B_it).back() <<
+          // "\n";
 
-          dbgs() << "OriginalBB Second Last Instruction: ";
-          Instruction *secondLastInst = (*B_it).back().getPrevNode();
-          secondLastInst->print(dbgs()); // or use dump() for more details
-          dbgs() << "\n";
+          // dbgs() << "OriginalBB Second Last Instruction: ";
+          // Instruction *secondLastInst = (*B_it).back().getPrevNode();
+          // secondLastInst->print(dbgs()); // or use dump() for more
+          // details dbgs() << "\n";
 
-          // Remove the unconditional branch instruction from the original basic
-          // block.
+          // Remove the unconditional branch instruction from the original
+          // basic block.
           (*B_it).getTerminator()->eraseFromParent();
           // Insert a branch instruction to the checkBlock.
           IRBuilder<> originalBlockBuilder(&*B_it);

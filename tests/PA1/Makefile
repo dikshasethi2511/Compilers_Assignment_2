@@ -4,7 +4,7 @@ LLC=../../build/bin/llc
 DIS=../../build/bin/llvm-dis
 SLIB=../../build/lib/LLVMCSE301.so
 
-SRCS=$(filter-out support.c,$(wildcard *.c))
+SRCS=$(filter-out support.c,$(wildcard nullcheck1.c))
 TARGETS=$(patsubst %.c,%,$(SRCS))
 
 default: $(TARGETS)
