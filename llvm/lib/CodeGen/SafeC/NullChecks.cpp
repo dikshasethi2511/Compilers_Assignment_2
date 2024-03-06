@@ -45,10 +45,12 @@ struct NullCheck : public FunctionPass {
   std::unordered_map<Instruction *, std::unordered_map<Value *, NullCheckType>>
       IN, OUT;
 
+  // Keeps a count of the newly created basic blocks.
   int count = 0;
 
   // Vector to store all pointer operands in the function.
   std::vector<Value *> pointerOperands;
+  // Vector to store all pointer operands in the function arguments.
   std::vector<Value *> argOperands;
 
   std::unordered_map<Value *, NullCheckType>
@@ -182,7 +184,7 @@ struct NullCheck : public FunctionPass {
     // vector.
     for (auto &B : F) {
       for (auto &I : B) {
-        // Stores the variables on the right hand side.
+        // Stores the variables on the left hand side.
         if (isa<PointerType>(I.getType())) {
           pointerOperands.push_back(&I);
         }
@@ -204,6 +206,8 @@ struct NullCheck : public FunctionPass {
 
     // Initialize IN and OUT sets of all instructions for all pointer operands
     // as UNDEFINED.
+    // Initialize IN and OUT sets of all instructions for all function arguments
+    // as MIGHT_BE_NULL.
     for (auto &B : F) {
       for (auto &I : B) {
         // Iterate over the pointerOperands vector.
@@ -257,11 +261,9 @@ struct NullCheck : public FunctionPass {
   }
 
   bool runOnFunction(Function &F) override {
-    if (F.getName() == "main") {
-      return false;
-    }
-
     dbgs() << "running nullcheck pass on: " << F.getName() << "\n";
+
+    // Clear the IN and OUT sets before each function pass.
     IN = std::unordered_map<Instruction *,
                             std::unordered_map<Value *, NullCheckType>>{};
     OUT = std::unordered_map<Instruction *,
@@ -322,12 +324,6 @@ struct NullCheck : public FunctionPass {
           break;
         }
 
-        // // Print all the basic blocks of the function.
-        // dbgs() << "Function: " << F.getName() << "\n";
-        // dbgs() << "Basic Blocks: \n";
-        // for (auto &B : F) {
-        //   dbgs() << B.getName() << "\n";
-        // }
         Instruction *currentInst = &*I_it;
         Value *operand;
 
@@ -337,7 +333,13 @@ struct NullCheck : public FunctionPass {
         if (LoadInst *LI = dyn_cast<LoadInst>(currentInst)) {
           operand = LI->getPointerOperand();
         } else if (StoreInst *SI = dyn_cast<StoreInst>(currentInst)) {
-          operand = SI->getPointerOperand();
+          // Check if value operand is a pointer operand.
+          if (isa<PointerType>(SI->getValueOperand()->getType())) {
+            operand = SI->getValueOperand();
+          } else {
+            continue;
+          }
+          // operand = SI->getPointerOperand();
         } else if (GetElementPtrInst *GEP =
                        dyn_cast<GetElementPtrInst>(currentInst)) {
           operand = GEP->getPointerOperand();
@@ -361,13 +363,6 @@ struct NullCheck : public FunctionPass {
 
           count++;
 
-          // // Print the last instruction of NewBB.
-          // dbgs() << "NewBB: " << NewBB->getName() << "\n";
-          // dbgs() << "NewBB Last Instruction: " << NewBB->back() << "\n";
-          // // Print the first instruction of newBB.
-          // dbgs() << "NewBB First Instruction: " << NewBB->front() <<
-          // "\n";
-
           // Create the blocks for null check logic.
           BasicBlock *CheckBlock =
               BasicBlock::Create(F.getContext(), "nullcheck", &F);
@@ -376,46 +371,26 @@ struct NullCheck : public FunctionPass {
 
           // Add the null check logic in the CheckBlock.
           IRBuilder<> builder(CheckBlock);
+          dbgs() << "operand: " << *operand << "\n";
+
           Value *isNull = builder.CreateICmpEQ(
               operand,
               ConstantPointerNull::get(cast<PointerType>(operand->getType())));
+
           builder.CreateCondBr(isNull, ExitBlock, NewBB);
 
           // Terminate the ExitBlock.
           IRBuilder<> exitBuilder(ExitBlock);
-          exitBuilder.CreateRetVoid();
-          // FunctionType *ExitFuncType =
-          //     FunctionType::get(Type::getVoidTy(F.getContext()),
-          //                       {Type::getInt32Ty(F.getContext())}, false);
-          // FunctionCallee exitFunc =
-          //     F.getParent()->getOrInsertFunction("exit", ExitFuncType);
-          // exitBuilder.CreateCall(
-          //     exitFunc,
-          //     {ConstantInt::get(Type::getInt32Ty(F.getContext()), 0)});
-          // exitBuilder.CreateUnreachable();
-
-          // // Print all the instructions of the CheckBlock and the
-          // ExitBlock. dbgs() << "CheckBlock: " << CheckBlock->getName() <<
-          // "\n"; dbgs() << "CheckBlock Instructions: \n"; for (auto &I :
-          // *CheckBlock) {
-          //   dbgs() << I << "\n";
-          // }
-          // dbgs() << "ExitBlock: " << ExitBlock->getName() << "\n";
-          // dbgs() << "ExitBlock Instructions: \n";
-          // for (auto &I : *ExitBlock) {
-          //   dbgs() << I << "\n";
-          // }
-
-          // Before deleting the original instruction from the basic block.
-          // Print the last instruction of the original basic block.
-          // dbgs() << "OriginalBB: " << (*B_it).getName() << "\n";
-          // dbgs() << "OriginalBB Last Instruction: " << (*B_it).back() <<
-          // "\n";
-
-          // dbgs() << "OriginalBB Second Last Instruction: ";
-          // Instruction *secondLastInst = (*B_it).back().getPrevNode();
-          // secondLastInst->print(dbgs()); // or use dump() for more
-          // details dbgs() << "\n";
+          // exitBuilder.CreateRetVoid();
+          FunctionType *ExitFuncType =
+              FunctionType::get(Type::getVoidTy(F.getContext()),
+                                {Type::getInt32Ty(F.getContext())}, false);
+          FunctionCallee exitFunc =
+              F.getParent()->getOrInsertFunction("exit", ExitFuncType);
+          exitBuilder.CreateCall(
+              exitFunc,
+              {ConstantInt::get(Type::getInt32Ty(F.getContext()), 0)});
+          exitBuilder.CreateUnreachable();
 
           // Remove the unconditional branch instruction from the original
           // basic block.
