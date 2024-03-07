@@ -271,87 +271,89 @@ struct NullCheck : public FunctionPass {
 
     performDataFlowAnalysis(F);
 
-    // Print IN and OUT sets.
-    for (auto &B : F) {
-      for (auto &I : B) {
-        dbgs() << "================>Instruction: " << I << "\n";
-        dbgs() << "IN ========> \n";
-        for (const auto &entry : IN[&I]) {
-          dbgs() << entry.first << " : ";
-          switch (entry.second) {
-          case NullCheckType::UNDEFINED:
-            dbgs() << "UNDEFINED";
-            break;
-          case NullCheckType::NOT_A_NULL:
-            dbgs() << "NOT_A_NULL";
-            break;
-          case NullCheckType::MIGHT_BE_NULL:
-            dbgs() << "MIGHT_BE_NULL";
-            break;
-          }
-          dbgs() << "\n";
-        }
+    // // Print IN and OUT sets.
+    // for (auto &B : F) {
+    //   for (auto &I : B) {
+    //     dbgs() << "================>Instruction: " << I << "\n";
+    //     dbgs() << "IN ========> \n";
+    //     for (const auto &entry : IN[&I]) {
+    //       dbgs() << entry.first << " : ";
+    //       switch (entry.second) {
+    //       case NullCheckType::UNDEFINED:
+    //         dbgs() << "UNDEFINED";
+    //         break;
+    //       case NullCheckType::NOT_A_NULL:
+    //         dbgs() << "NOT_A_NULL";
+    //         break;
+    //       case NullCheckType::MIGHT_BE_NULL:
+    //         dbgs() << "MIGHT_BE_NULL";
+    //         break;
+    //       }
+    //       dbgs() << "\n";
+    //     }
 
-        dbgs() << "OUT ========> \n";
-        for (const auto &entry : OUT[&I]) {
-          dbgs() << entry.first << " : ";
-          switch (entry.second) {
-          case NullCheckType::UNDEFINED:
-            dbgs() << "UNDEFINED";
-            break;
-          case NullCheckType::NOT_A_NULL:
-            dbgs() << "NOT_A_NULL";
-            break;
-          case NullCheckType::MIGHT_BE_NULL:
-            dbgs() << "MIGHT_BE_NULL";
-            break;
-          }
-          dbgs() << "\n";
-        }
-      }
-    }
+    //     dbgs() << "OUT ========> \n";
+    //     for (const auto &entry : OUT[&I]) {
+    //       dbgs() << entry.first << " : ";
+    //       switch (entry.second) {
+    //       case NullCheckType::UNDEFINED:
+    //         dbgs() << "UNDEFINED";
+    //         break;
+    //       case NullCheckType::NOT_A_NULL:
+    //         dbgs() << "NOT_A_NULL";
+    //         break;
+    //       case NullCheckType::MIGHT_BE_NULL:
+    //         dbgs() << "MIGHT_BE_NULL";
+    //         break;
+    //       }
+    //       dbgs() << "\n";
+    //     }
+    //   }
+    // }
 
     // Map of instructions already processed.
     std::unordered_map<Instruction *, bool> processedInstructions;
 
     for (auto B_it = F.begin(); B_it != F.end(); ++B_it) {
+      // dbgs() << "Basic Block: " << B_it->getName() << "\n";
       BasicBlock *B = &*B_it;
       for (auto I_it = B->begin(); I_it != B->end(); ++I_it) {
         bool nullcheckFound = false;
 
         // Check if processedInstructions contains the current instruction.
         if (processedInstructions.find(&*I_it) != processedInstructions.end()) {
-          break;
+          continue;
         }
 
         Instruction *currentInst = &*I_it;
         Value *operand;
 
-        dbgs() << "currentInst: " << *currentInst << "\n";
+        // dbgs() << "Current instruction: " << *currentInst << "\n";
+        // dbgs() << "Instruction type: " << currentInst->getOpcodeName() <<
+        // "\n";
 
         // Determine the operand based on the instruction type
         if (LoadInst *LI = dyn_cast<LoadInst>(currentInst)) {
           operand = LI->getPointerOperand();
         } else if (StoreInst *SI = dyn_cast<StoreInst>(currentInst)) {
-          // Check if value operand is a pointer operand.
-          if (isa<PointerType>(SI->getValueOperand()->getType())) {
-            operand = SI->getValueOperand();
-          } else {
-            continue;
-          }
-          // operand = SI->getPointerOperand();
+          operand = SI->getPointerOperand();
         } else if (GetElementPtrInst *GEP =
                        dyn_cast<GetElementPtrInst>(currentInst)) {
           operand = GEP->getPointerOperand();
         } else if (CastInst *CI = dyn_cast<CastInst>(currentInst)) {
           operand = CI->getOperand(0);
+        } else if (CallInst *CLI = dyn_cast<CallInst>(currentInst)) {
+          // Check function call is made via a pointer
+          operand = CLI->getCalledOperand();
+          // dbgs() << "Function pointer: ========================= : " <<
+          // *operand
+          //        << "\n";
         } else {
           continue;
         }
 
         if (OUT[currentInst][operand] == NullCheckType::MIGHT_BE_NULL) {
-          dbgs() << "Found a null check: " << *currentInst << "\n";
-          dbgs() << "Current basic block: " << (*B_it).getName() << "\n";
+          // dbgs() << "Found a null check: " << *currentInst << "\n";
 
           // Add to processedInstructions map.
           processedInstructions[currentInst] = true;
@@ -371,7 +373,6 @@ struct NullCheck : public FunctionPass {
 
           // Add the null check logic in the CheckBlock.
           IRBuilder<> builder(CheckBlock);
-          dbgs() << "operand: " << *operand << "\n";
 
           Value *isNull = builder.CreateICmpEQ(
               operand,
