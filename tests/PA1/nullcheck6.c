@@ -12,8 +12,12 @@ void foo ()
 	fnptr(1);
 	if (fnptr != NULL) {
 		fnptr = NULL;
-		fnptr(1);
-		fnptr = bar;
+                printf("before error \n");
+
+                fnptr(1);
+                printf("after error \n");
+
+                fnptr = bar;
 	}
 	else {
 		fnptr(1);

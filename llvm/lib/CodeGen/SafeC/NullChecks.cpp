@@ -70,13 +70,19 @@ struct NullCheck : public FunctionPass {
       // If the string is present in both sets.
       if (it != prevBlockTerminatorInstruction.end()) {
         // If even one of them is MIGHT_BE_NULL, the result is MIGHT_BE_NULL.
-        result[op] = (entry.second == NullCheckType::NOT_A_NULL &&
-                      it->second == NullCheckType::NOT_A_NULL)
-                         ? NullCheckType::NOT_A_NULL
-                         : ((entry.second == NullCheckType::UNDEFINED &&
-                             it->second == NullCheckType::UNDEFINED)
-                                ? NullCheckType::UNDEFINED
-                                : NullCheckType::MIGHT_BE_NULL);
+
+        if (entry.second == NullCheckType::UNDEFINED) {
+          result[op] = it->second;
+        } else if (entry.second == NullCheckType::MIGHT_BE_NULL) {
+          result[op] = NullCheckType::MIGHT_BE_NULL;
+        } else {
+          if (it->second == NullCheckType::MIGHT_BE_NULL) {
+            result[op] = NullCheckType::MIGHT_BE_NULL;
+          } else {
+            result[op] = NullCheckType::NOT_A_NULL;
+          }
+        }
+
       } else {
         // If the variable is not present in prevBlockTerminatorInstruction,
         // keep the value from currentInstruction.
