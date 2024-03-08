@@ -7,8 +7,12 @@ void foo (int *arr)
 
 	ptr[0] = 100;
 	ptr = arr;
-	ptr[0] = 100;
-	if (ptr == NULL) {
+        printf("before error \n");
+
+        ptr[0] = 100;
+        printf("after error \n");
+
+        if (ptr == NULL) {
 		ptr = mymalloc(4);
 label:
 		ptr[0] = 100;
