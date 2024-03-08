@@ -73,7 +73,10 @@ struct NullCheck : public FunctionPass {
         result[op] = (entry.second == NullCheckType::NOT_A_NULL &&
                       it->second == NullCheckType::NOT_A_NULL)
                          ? NullCheckType::NOT_A_NULL
-                         : NullCheckType::MIGHT_BE_NULL;
+                         : ((entry.second == NullCheckType::UNDEFINED &&
+                             it->second == NullCheckType::UNDEFINED)
+                                ? NullCheckType::UNDEFINED
+                                : NullCheckType::MIGHT_BE_NULL);
       } else {
         // If the variable is not present in prevBlockTerminatorInstruction,
         // keep the value from currentInstruction.
@@ -115,11 +118,10 @@ struct NullCheck : public FunctionPass {
     }
 
     // If the instruction is a Store instruction, then the pointer operand is
-    // set to might be NULL. Note: We only consider the pointer operand of the
-    // Store instruction.
-    // TODO: This might not be correct, check this
+    // set to might be NULL only if the value operand is also of pointer type.
+    // Otherwise, the OUT set is the same as the IN set.
     else if (SI) {
-      if (isa<PointerType>(SI->getPointerOperand()->getType())) {
+      if (isa<PointerType>(SI->getValueOperand()->getType())) {
         result[SI->getPointerOperand()] = NullCheckType::MIGHT_BE_NULL;
       }
     }
