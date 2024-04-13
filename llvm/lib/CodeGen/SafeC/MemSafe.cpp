@@ -69,6 +69,7 @@ void MemSafe::transformAllocaToMyMalloc(Function &F) {
   for (BasicBlock &BB : F) {
     // Collect alloca instructions to erase them later.
     std::vector<AllocaInst *> AllocaInstructions;
+    std::vector<CallInst *> MallocCalls;
     // Traverse through all the instructions of the basic block.
     for (Instruction &I : BB) {
       // Whenever an alloca instruction is found, replace it with a call to
@@ -106,8 +107,27 @@ void MemSafe::transformAllocaToMyMalloc(Function &F) {
         AI->replaceAllUsesWith(MallocResult);
         // Add alloca instruction to the list for later erasure.
         AllocaInstructions.push_back(AI);
+        MallocCalls.push_back(MallocCall);
       }
     }
+
+    // Insert myfree calls for each mymalloc call at the end of the basic block.
+    if (!MallocCalls.empty()) {
+      for (CallInst *MallocCall : MallocCalls) {
+        BasicBlock *BB = MallocCall->getParent();
+        // The myfree call is inserted at the end of the basic block when the
+        // scope gets over.
+        Instruction *InsertPoint = BB->getTerminator();
+        IRBuilder<> Builder(InsertPoint);
+        FunctionType *FreeFuncType =
+            FunctionType::get(Type::getVoidTy(F.getContext()),
+                              {Type::getInt8PtrTy(F.getContext())}, false);
+        FunctionCallee FreeFunc =
+            F.getParent()->getOrInsertFunction("myfree", FreeFuncType);
+        Builder.CreateCall(FreeFunc, {MallocCall});
+      }
+    }
+
     // Erase all collected alloca instructions.
     for (AllocaInst *AI : AllocaInstructions) {
       AI->eraseFromParent();
