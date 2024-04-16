@@ -30,6 +30,12 @@ run1:
 	./test1 20 19
 	./test1 20 6
 
+run2:
+	./test2 20 2
+	./test2 20 5
+	./test2 20 19
+	./test2 20 6
+
 run:
 	echo "running test1"
 	./test1 20 2

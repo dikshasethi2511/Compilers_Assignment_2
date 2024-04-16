@@ -41,6 +41,9 @@ struct MemSafe : public FunctionPass {
 
   bool runOnFunction(Function &F) override;
   void transformAllocaToMyMalloc(Function &F);
+  void findBasePointers(Value *V, std::set<Value *> &BasePointers, Function &F);
+  bool checkOutOfBounds(GetElementPtrInst *GEP, Function &F,
+                        const DataLayout &DL);
 
 }; // end of struct MemSafe
 } // end of anonymous namespace
@@ -135,9 +138,134 @@ void MemSafe::transformAllocaToMyMalloc(Function &F) {
   }
 }
 
+void MemSafe::findBasePointers(Value *V, std::set<Value *> &BasePointers,
+                               Function &F) {
+
+  // If the instruction is a call instruction and the function being called is
+  // mymalloc, then add the call instruction to the set of base pointers.
+  // This means that we have reached the base pointer of the variable and found
+  // the first instruction where it was allocated.
+  if (CallInst *CI = dyn_cast<CallInst>(V)) {
+    Function *Callee = CI->getCalledFunction();
+    if (isLibraryCall(CI, TLI)) {
+      dbgs() << "Library Call: " << *CI << "\n";
+      return;
+    }
+    BasePointers.insert(CI);
+    return;
+  }
+
+  // If the instruction is a GEP instruction, then backtrack to find the base
+  // pointer of the variable.
+  else if (GetElementPtrInst *GEP = dyn_cast<GetElementPtrInst>(V)) {
+    for (Value *Idx : GEP->indices()) {
+      if (Instruction *I = dyn_cast<Instruction>(Idx)) {
+        findBasePointers(I, BasePointers, F);
+      }
+    }
+    return;
+  }
+
+  // If the instruction is a load instruction, then backtrack to find the base
+  // pointer of the variable.
+  else if (LoadInst *LI = dyn_cast<LoadInst>(V)) {
+    findBasePointers(LI->getPointerOperand(), BasePointers, F);
+    return;
+  }
+
+  // If the instruction is a bitcast instruction, then backtrack to find the
+  // base pointer of the variable.
+  else if (BitCastInst *BCI = dyn_cast<BitCastInst>(V)) {
+    findBasePointers(BCI->getOperand(0), BasePointers, F);
+    return;
+  } else {
+    // Check if the variable we are looking for matches any of the function
+    // arguments.
+    for (Argument &Arg : F.args()) {
+      if (V == &Arg) {
+        BasePointers.insert(V);
+        return;
+      }
+    }
+  }
+}
+
+bool MemSafe::checkOutOfBounds(GetElementPtrInst *GEP, Function &F,
+                               const DataLayout &DL) {
+
+  // Find the base pointer of the variable which is being accessed.
+  std::set<Value *> basePointers;
+  Value *startPoint = GEP->getPointerOperand();
+  // Backtrack all the GEP and Bitcast instructions to find the base pointer.
+  findBasePointers(startPoint, basePointers, F);
+
+  // If the basePointers set is empty, then the base pointer of the variable
+  // could not be found. This means that the variable is not allocated using
+  // mymalloc.
+  if (basePointers.empty()) {
+    return false;
+  }
+
+  IRBuilder<> IRB(GEP);
+
+  for (Value *Base : basePointers) {
+    if (Instruction *BaseI = dyn_cast<Instruction>(Base)) {
+      // Directly use the index from the GEP instruction.
+      Value *Index = GEP->getOperand(1);
+      Value *realBase = IRB.CreateGEP(BaseI, {Index});
+      // Get the size of the access.
+      Value *AccessSize =
+          IRB.getInt64(DL.getTypeAllocSize(GEP->getResultElementType()));
+      dbgs() << "Access Size: " << *AccessSize << "\n";
+      // Check if the access is within bounds.
+      // Call CheckBounds functions with base, realbase, size, and access size.
+      FunctionType *BoundsCheckFuncType =
+          FunctionType::get(Type::getVoidTy(F.getContext()),
+                            {Type::getInt8PtrTy(F.getContext()),
+                             Type::getInt8PtrTy(F.getContext()),
+                             Type::getInt64Ty(F.getContext())},
+                            false);
+
+      // Show all the arguments of the call.
+      dbgs() << "BoundsCheckFuncType: " << *BoundsCheckFuncType << "\n";
+      dbgs() << "Base: " << *Base << "\n";
+      dbgs() << "RealBase: " << *realBase << "\n";
+      dbgs() << "AccessSize: " << *AccessSize << "\n";
+
+      FunctionCallee BoundsCheckFunc = F.getParent()->getOrInsertFunction(
+          "BoundsCheck", BoundsCheckFuncType);
+
+      dbgs() << "BoundsCheckFunc: " << *BoundsCheckFunc.getCallee() << "\n";
+
+      // Get the size of the real base.
+      
+
+      IRB.SetInsertPoint(GEP);
+      IRB.CreateCall(
+          BoundsCheckFunc,
+          {IRB.CreateBitCast(Base, Type::getInt8PtrTy(F.getContext())),
+           IRB.CreateBitCast(realBase, Type::getInt8PtrTy(F.getContext())),
+           AccessSize});
+    }
+  }
+
+  return true;
+}
+
 bool MemSafe::runOnFunction(Function &F) {
   TLI = &getAnalysis<TargetLibraryInfoWrapperPass>().getTLI();
   transformAllocaToMyMalloc(F);
+  for (BasicBlock &BB : F) {
+    for (Instruction &I : BB) {
+      // Check if the instruction is a GetElementPtr instruction.
+      // If it is, check if the instruction is out of bounds.
+      if (GetElementPtrInst *GEP = dyn_cast<GetElementPtrInst>(&I)) {
+        bool isOutOfBounds =
+            checkOutOfBounds(GEP, F, F.getParent()->getDataLayout());
+      }
+    }
+  }
+
   return true;
 }
 
