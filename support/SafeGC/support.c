@@ -33,7 +33,9 @@ void *mycast(void *Ptr, unsigned long long Bitmap, unsigned Size) {
 void IsSafeToEscape(void *Base, void *Ptr) {}
 
 void BoundsCheck(void *Base, void *Ptr, size_t AccessSize) {
+  printf("Base: %p, Ptr: %p, AccessSize: %lu\n", Base, Ptr, AccessSize);
   size_t Size = GetSize(Base);
+  printf("Size: %lu\n", Size);
   if ((char *)Base <= (char *)Ptr &&
       (char *)Ptr + AccessSize <= (char *)Base + Size) {
     // printf("Access is within bounds\n");
@@ -45,6 +47,9 @@ void BoundsCheck(void *Base, void *Ptr, size_t AccessSize) {
 
 void BoundsCheckWithSize(void *RealBase, void *Ptr, size_t Size,
                          size_t AccessSize) {
+  printf("RealBase: %p, Ptr: %p, Size: %lu, AccessSize: %lu\n", RealBase, Ptr,
+         Size, AccessSize);
+
   if ((char *)RealBase <= (char *)Ptr &&
       (char *)Ptr + AccessSize <= (char *)RealBase + Size) {
     // printf("Access is within bounds\n");

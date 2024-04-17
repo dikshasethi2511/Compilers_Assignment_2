@@ -82,8 +82,38 @@ void MemSafe::transformAllocaToMyMalloc(Function &F) {
         // Get the size and type of the allocated memory.
         // We pass the obtained size to the mymalloc call to allocate the
         // memory.
+        // Get the allocated type and calculate the total size.
         Type *Ty = AI->getAllocatedType();
-        uint64_t Size = DL.getTypeAllocSize(Ty);
+
+        // Calculate the total size.
+        Value *totalSizeValue = nullptr;
+
+        if (Ty->isArrayTy() || AI->isArrayAllocation()) {
+          uint64_t elemSize;
+          Type *Int64Ty = Type::getInt64Ty(F.getContext());
+
+          if (AI->isArrayAllocation()) {
+            // For array allocations, the size is the second operand of the
+            // alloca instruction.
+            totalSizeValue = AI->getOperand(0);
+            elemSize = DL.getTypeAllocSize(Ty);
+            totalSizeValue = Builder.CreateMul(
+                totalSizeValue, ConstantInt::get(Int64Ty, elemSize));
+          } else {
+            // If the type is an array, calculate the total size using the array
+            // size.
+            uint64_t Size = 1;
+            Size = cast<ArrayType>(Ty)->getNumElements();
+            totalSizeValue = Builder.CreateMul(
+                ConstantInt::get(Int64Ty, Size),
+                ConstantInt::get(
+                    Int64Ty,
+                    AI->getModule()->getDataLayout().getTypeAllocSize(Ty)));
+          }
+        } else {
+          // If it's not an array, calculate the size of the type directly.
+          totalSizeValue = Builder.getInt64(DL.getTypeAllocSize(Ty));
+        }
 
         // Create a call to mymalloc.
         FunctionType *MallocFuncType = FunctionType::get(
@@ -92,9 +122,7 @@ void MemSafe::transformAllocaToMyMalloc(Function &F) {
             {Type::getInt64Ty(F.getContext())}, false);
         FunctionCallee MallocFunc =
             F.getParent()->getOrInsertFunction("mymalloc", MallocFuncType);
-        CallInst *MallocCall = Builder.CreateCall(
-            MallocFunc,
-            {ConstantInt::get(Type::getInt64Ty(F.getContext()), Size)});
+        CallInst *MallocCall = Builder.CreateCall(MallocFunc, {totalSizeValue});
 
         // Bitcast the result of mymalloc to the desired type.
         // Taken from nullcheck pass.
@@ -210,13 +238,15 @@ bool MemSafe::checkOutOfBounds(GetElementPtrInst *GEP, Function &F,
 
   for (Value *Base : basePointers) {
     if (Instruction *BaseI = dyn_cast<Instruction>(Base)) {
-      // Directly use the index from the GEP instruction.
-      Value *Index = GEP->getOperand(1);
-      Value *realBase = IRB.CreateGEP(BaseI, {Index});
       // Get the size of the access.
       Value *AccessSize =
           IRB.getInt64(DL.getTypeAllocSize(GEP->getResultElementType()));
       dbgs() << "Access Size: " << *AccessSize << "\n";
+      // Directly use the index from the GEP instruction.
+      Value *Index = GEP->getOperand(1);
+      Index = IRB.CreateMul(Index, AccessSize);
+      Value *realBase = IRB.CreateGEP(BaseI, {Index});
+
       // Check if the access is within bounds.
       // Call CheckBounds functions with base, realbase, size, and access size.
       FunctionType *BoundsCheckFuncType =
@@ -238,7 +268,6 @@ bool MemSafe::checkOutOfBounds(GetElementPtrInst *GEP, Function &F,
       dbgs() << "BoundsCheckFunc: " << *BoundsCheckFunc.getCallee() << "\n";
 
       // Get the size of the real base.
-      
 
       IRB.SetInsertPoint(GEP);
       IRB.CreateCall(
