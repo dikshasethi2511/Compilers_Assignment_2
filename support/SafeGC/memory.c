@@ -508,7 +508,7 @@ void SetType(void *Obj, unsigned long long Type)
 
 void* GetAlignedAddr(void *Addr, size_t Alignment)
 {
-	ObjHeader *Header = ObjToHeader(Addr);
+	ObjHeader *Header = ObjToHeader(Addr); 
 	Header->Alignment = Alignment;
 	return (void*)Align((size_t)(Addr), Alignment);
 }

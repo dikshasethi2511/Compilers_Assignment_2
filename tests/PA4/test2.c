@@ -11,7 +11,7 @@ void __attribute__((noinline)) bar(int *arr, int offset) {
 	arr[offset] = 0;
 }
 
-void __attribute__((noinline)) foo(struct List *node, int offset) {
+void __attribute__((noinline)) foo(struct List *node, int offset) { // node => arr[offset + 1]
 	int *arr = node->arr; // arr = og_arr[offset + 1]
 	arr[offset] = 20; // og_arr[offset + 1 + offset] = 20
 	bar(&arr[offset+8], offset); // of_arr[offset + 1 + offset + 8] = 0

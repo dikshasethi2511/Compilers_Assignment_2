@@ -23,6 +23,7 @@
 #include "llvm/IR/LegacyPassManager.h"
 #include "llvm/Transforms/IPO/PassManagerBuilder.h"
 
+#include <cstdlib>
 #include <deque>
 #include <map>
 
@@ -44,6 +45,9 @@ struct MemSafe : public FunctionPass {
   void findBasePointers(Value *V, std::set<Value *> &BasePointers, Function &F);
   bool checkOutOfBounds(GetElementPtrInst *GEP, Function &F,
                         const DataLayout &DL);
+  bool reachedAnArgument(Value *V, bool result, Function &F);
+  void insertWriteBarrier(Value *Base, Value *Ptr, Value *ObjSize,
+                          IRBuilder<> &IRB, Function *F);
 
 }; // end of struct MemSafe
 } // end of anonymous namespace
@@ -176,7 +180,6 @@ void MemSafe::findBasePointers(Value *V, std::set<Value *> &BasePointers,
   if (CallInst *CI = dyn_cast<CallInst>(V)) {
     Function *Callee = CI->getCalledFunction();
     if (isLibraryCall(CI, TLI)) {
-      dbgs() << "Library Call: " << *CI << "\n";
       return;
     }
     BasePointers.insert(CI);
@@ -218,12 +221,68 @@ void MemSafe::findBasePointers(Value *V, std::set<Value *> &BasePointers,
   }
 }
 
+bool MemSafe::reachedAnArgument(Value *V, bool result, Function &F) {
+  // If the instruction is a call instruction and the function being called is
+  // mymalloc, then add the call instruction to the set of base pointers.
+  // This means that we have reached the base pointer of the variable and found
+  // the first instruction where it was allocated.
+  if (CallInst *CI = dyn_cast<CallInst>(V)) {
+    Function *Callee = CI->getCalledFunction();
+    if (isLibraryCall(CI, TLI)) {
+      return false;
+    }
+    return false;
+  }
+
+  // If the instruction is a GEP instruction, then backtrack to find the base
+  // pointer of the variable.
+  else if (GetElementPtrInst *GEP = dyn_cast<GetElementPtrInst>(V)) {
+    for (Value *Idx : GEP->indices()) {
+      if (Instruction *I = dyn_cast<Instruction>(Idx)) {
+        return result || reachedAnArgument(I, false, F);
+      }
+    };
+  }
+
+  // If the instruction is a load instruction, then backtrack to find the base
+  // pointer of the variable.
+  else if (LoadInst *LI = dyn_cast<LoadInst>(V)) {
+    return result || reachedAnArgument(LI->getPointerOperand(), false, F);
+  }
+
+  // If the instruction is a bitcast instruction, then backtrack to find the
+  // base pointer of the variable.
+  else if (BitCastInst *BCI = dyn_cast<BitCastInst>(V)) {
+    return result || reachedAnArgument(BCI->getOperand(0), false, F);
+  } else {
+    // Check if the variable we are looking for matches any of the function
+    // arguments.
+    for (Argument &Arg : F.args()) {
+      if (V == &Arg) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 bool MemSafe::checkOutOfBounds(GetElementPtrInst *GEP, Function &F,
                                const DataLayout &DL) {
 
   // Find the base pointer of the variable which is being accessed.
   std::set<Value *> basePointers;
   Value *startPoint = GEP->getPointerOperand();
+  Value *checkReachedArg = GEP->getPointerOperand();
+  if (reachedAnArgument(checkReachedArg, false, F)) {
+    IRBuilder<> IRB(GEP);
+    FunctionType *CallingExitType =
+        FunctionType::get(Type::getVoidTy(F.getContext()), false);
+    FunctionCallee CallingExitFunc =
+        F.getParent()->getOrInsertFunction("CallingExit", CallingExitType);
+    IRB.SetInsertPoint(GEP);
+    IRB.CreateCall(CallingExitFunc);
+    return true;
+  }
   // Backtrack all the GEP and Bitcast instructions to find the base pointer.
   findBasePointers(startPoint, basePointers, F);
 
@@ -241,7 +300,6 @@ bool MemSafe::checkOutOfBounds(GetElementPtrInst *GEP, Function &F,
       // Get the size of the access.
       Value *AccessSize =
           IRB.getInt64(DL.getTypeAllocSize(GEP->getResultElementType()));
-      dbgs() << "Access Size: " << *AccessSize << "\n";
       // Directly use the index from the GEP instruction.
       Value *Index = GEP->getOperand(1);
       Index = IRB.CreateMul(Index, AccessSize);
@@ -256,18 +314,8 @@ bool MemSafe::checkOutOfBounds(GetElementPtrInst *GEP, Function &F,
                              Type::getInt64Ty(F.getContext())},
                             false);
 
-      // Show all the arguments of the call.
-      dbgs() << "BoundsCheckFuncType: " << *BoundsCheckFuncType << "\n";
-      dbgs() << "Base: " << *Base << "\n";
-      dbgs() << "RealBase: " << *realBase << "\n";
-      dbgs() << "AccessSize: " << *AccessSize << "\n";
-
       FunctionCallee BoundsCheckFunc = F.getParent()->getOrInsertFunction(
           "BoundsCheck", BoundsCheckFuncType);
-
-      dbgs() << "BoundsCheckFunc: " << *BoundsCheckFunc.getCallee() << "\n";
-
-      // Get the size of the real base.
 
       IRB.SetInsertPoint(GEP);
       IRB.CreateCall(
@@ -281,6 +329,21 @@ bool MemSafe::checkOutOfBounds(GetElementPtrInst *GEP, Function &F,
   return true;
 }
 
+void MemSafe::insertWriteBarrier(Value *Base, Value *Ptr, Value *ObjSize,
+                                 IRBuilder<> &IRB, Function *F) {
+  FunctionType *WriteBarrierFuncType =
+      FunctionType::get(Type::getVoidTy(Base->getContext()),
+                        {Type::getInt8PtrTy(Base->getContext()),
+                         Type::getInt8PtrTy(Base->getContext()),
+                         Type::getInt64Ty(Base->getContext())},
+                        false);
+
+  FunctionCallee WriteBarrierFunc =
+      F->getParent()->getOrInsertFunction("WriteBarrier", WriteBarrierFuncType);
+
+  IRB.CreateCall(WriteBarrierFunc, {Base, Ptr, ObjSize});
+}
+
 bool MemSafe::runOnFunction(Function &F) {
   TLI = &getAnalysis<TargetLibraryInfoWrapperPass>().getTLI();
   transformAllocaToMyMalloc(F);
@@ -291,6 +354,30 @@ bool MemSafe::runOnFunction(Function &F) {
       if (GetElementPtrInst *GEP = dyn_cast<GetElementPtrInst>(&I)) {
         bool isOutOfBounds =
             checkOutOfBounds(GEP, F, F.getParent()->getDataLayout());
+      }
+    }
+  }
+
+  for (BasicBlock &BB : F) {
+    for (Instruction &I : BB) {
+      // Check if the instruction is a store instruction.
+      if (StoreInst *SI = dyn_cast<StoreInst>(&I)) {
+        Value *StoredValue = SI->getValueOperand();
+        Value *StoredAddress = SI->getPointerOperand();
+        Type *StoredType = StoredValue->getType();
+
+        // Check if the stored value is a pointer.
+        if (StoredType->isPointerTy()) {
+          IRBuilder<> IRB(SI);
+          IRB.SetInsertPoint(SI);
+          // Get the size of the stored object.
+          Value *ObjSize =
+              IRB.getInt64(F.getParent()->getDataLayout().getTypeAllocSize(
+                  StoredType->getPointerElementType()));
+
+          // Insert the write barrier.
+          // insertWriteBarrier(StoredAddress, StoredValue, ObjSize, IRB, &F);
+        }
       }
     }
   }
